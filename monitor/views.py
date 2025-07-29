@@ -16,19 +16,12 @@ DB_PASSWORD = 'Manaus@92Master'
 
 
 def get_client_ip(request):
-    """
-    Obtém o IP do cliente de uma requisição Django.
-    """
     x_forwarded_for = request.META.get('HTTP_X_FORWARDED_FOR')
     if x_forwarded_for:
-        ip = x_forwarded_for.split(',')[0]
-    else:
-        ip = request.META.get('REMOTE_ADDR')
-    return ip
+        return x_forwarded_for.split(',')[0]
+    return request.META.get('REMOTE_ADDR')
 
 
-# URL e credenciais para login
-# LOGIN_URL = "http://192.168.0.129/login.fcgi"
 LOGIN_BODY = {
     "login": "admin",
     "password": "admin"
@@ -37,23 +30,19 @@ HEADERS = {"Content-Type": "application/json"}
 
 
 def get_session(ip_cliente):
-    """
-    Obtem a sessão usando o IP do cliente.
-    """
     login_url = f"http://{ip_cliente}/login.fcgi"
-    response = requests.post(login_url, json=LOGIN_BODY, headers=HEADERS)
-    if response.status_code == 200:
-        session_id = response.json().get("session")
-        if session_id:
-            return session_id
-    print(f"Falha ao obter a sessão, status code: {response.status_code}")
+    try:
+        response = requests.post(login_url, json=LOGIN_BODY, headers=HEADERS, timeout=5)
+        if response.status_code == 200:
+            return response.json().get("session")
+    except requests.exceptions.RequestException as e:
+        print(f"Erro ao obter sessão: {e}")
     return None
 
 
 def get_access_logs(ip_cliente):
     session_id = get_session(ip_cliente)
     if not session_id:
-        print("Sessão inválida ou não obtida.")
         return []
 
     sao_paulo_tz = pytz.timezone('America/Sao_Paulo')
@@ -63,54 +52,43 @@ def get_access_logs(ip_cliente):
     start_timestamp = int(start_of_day.timestamp())
     end_timestamp = int(end_of_day.timestamp())
 
-    # Substituir o IP fixo pelo IP dinâmico obtido
     url = f"http://{ip_cliente}/load_objects.fcgi?session={session_id}"
     body = {
         "object": "access_logs",
         "where": [
-            {"object": "access_logs", "field": "time", "operator": ">", "value": start_timestamp,
-             "connector": ") AND ("},
+            {"object": "access_logs", "field": "time", "operator": ">", "value": start_timestamp, "connector": ") AND ("},
             {"object": "access_logs", "field": "time", "operator": "<", "value": end_timestamp}
         ]
     }
-    response = requests.post(url, json=body, headers=HEADERS)
-
-    print("Status da resposta:", response.status_code)
-    print("Conteúdo da resposta:", response.text)
-
-    if response.status_code == 200:
-        return response.json().get('access_logs', [])
-    else:
-        print(f"Falha ao recuperar os logs de acesso, status code: {response.status_code}")
-        return []
+    try:
+        response = requests.post(url, json=body, headers=HEADERS, timeout=10)
+        if response.status_code == 200:
+            return response.json().get('access_logs', [])
+    except requests.exceptions.RequestException as e:
+        print(f"Erro ao buscar access_logs: {e}")
+    return []
 
 
 def get_user_data(user_id, ip_cliente):
     session_id = get_session(ip_cliente)
     if not session_id:
-        print("Sessão inválida ou não obtida.")
         return {}
 
-    # Substituir o IP fixo pelo IP dinâmico obtido
     url = f"http://{ip_cliente}/load_objects.fcgi?session={session_id}"
     body = {"object": "users", "where": {"users": {"id": user_id}}}
 
-    response = requests.post(url, json=body, headers=HEADERS)
-
-    print("Status da resposta:", response.status_code)
-    print("Conteúdo da resposta:", response.text)
-
-    if response.status_code == 200:
-        user_data = response.json().get('users', [])
-        return user_data[0] if user_data else {}
-    else:
-        print(f"Falha ao recuperar os dados do usuário, status code: {response.status_code}")
-        return {}
+    try:
+        response = requests.post(url, json=body, headers=HEADERS, timeout=5)
+        if response.status_code == 200:
+            users = response.json().get('users', [])
+            return users[0] if users else {}
+    except requests.exceptions.RequestException as e:
+        print(f"Erro ao buscar user_data: {e}")
+    return {}
 
 
 def save_to_db(data):
     try:
-        # Conectar ao banco de dados
         connection = psycopg2.connect(
             host=DB_HOST,
             port=DB_PORT,
@@ -121,68 +99,38 @@ def save_to_db(data):
         cursor = connection.cursor()
 
         if data:
-            # Obter o último registro da lista
-            entry = data[-1]  # Apenas o último registro
-
+            entry = data[-1]
             try:
-                # Corrigir a conversão do timestamp Unix para datetime, considerando o fuso horário de São Paulo
-                if entry['datahora']:
-                    timestamp = int(entry['datahora'])
-                    # Converter o timestamp Unix para datetime no UTC
-                    datahora_utc = datetime.fromtimestamp(timestamp, pytz.UTC)
-                    # Converter para o horário de São Paulo
-                    sao_paulo_tz = pytz.timezone('America/Sao_Paulo')
-                    datahora = datahora_utc.astimezone(sao_paulo_tz)
-                else:
-                    datahora = None
+                timestamp = int(entry['datahora'])
+                datahora_utc = datetime.fromtimestamp(timestamp, pytz.UTC)
+                datahora = datahora_utc.astimezone(pytz.timezone('America/Sao_Paulo'))
 
-                # Inserir dados na tabela tbpresenca
                 sql_query = """
                 INSERT INTO tbpresenca (
-                    nome, device, created_at, logid, event, confidence, rol,tipo,cpf,stringunica, datahora
+                    nome, device, created_at, logid, event, confidence, rol, tipo, cpf, stringunica, datahora
                 )
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """
                 values = (
-                    entry['nome'],
-                    entry['device'],
-                    datetime.utcnow(),  # timestamp da inserção
-                    entry['logid'],
-                    entry['event'],
-                    entry['confidence'],
-                    entry['rol'],
-                    entry['tipo'],
-                    entry['cpf'],
-                    entry['stringunica'],
-                    datahora  # Corrigido para o timestamp convertido
+                    entry['nome'], entry['device'], datetime.utcnow(), entry['logid'],
+                    entry['event'], entry['confidence'], entry['rol'], entry['tipo'],
+                    entry['cpf'], entry['stringunica'], datahora
                 )
                 cursor.execute(sql_query, values)
                 connection.commit()
-                print(f"Último registro salvo: {values}")
-            except psycopg2.Error as e:
-                print(f"Erro ao inserir registro: {e}")
+            except Exception as e:
+                print(f"Erro ao salvar no banco: {e}")
                 connection.rollback()
 
         cursor.close()
         connection.close()
 
     except psycopg2.Error as e:
-        print(f"Erro na conexão com o banco de dados: {e}")
+        print(f"Erro de conexão com o banco: {e}")
 
 
 def get_setor(device_id, ip_cliente):
     try:
-        # Garantir que device_id seja uma string para comparações com idface do tipo VARCHAR
-        device_id_str = str(device_id)
-
-        # Query SQL para buscar o setor, com cast explícito para bigint
-        query = """
-            SELECT setor
-            FROM tbdispositivo
-            WHERE CAST(idface AS bigint) = %s
-        """
-
-        # Conectar ao banco de dados
         connection = psycopg2.connect(
             host=DB_HOST,
             port=DB_PORT,
@@ -192,21 +140,17 @@ def get_setor(device_id, ip_cliente):
         )
         cursor = connection.cursor()
 
-        # Executar a consulta no banco de dados
-        cursor.execute(query, (device_id_str,))
-        setor = cursor.fetchone()
+        cursor.execute("""
+            SELECT setor FROM tbdispositivo WHERE CAST(idface AS bigint) = %s
+        """, (str(device_id),))
 
-        if setor:
-            return setor[0] + 'TRUE'  # Retorna o setor concatenado com 'TRUE'
-        else:
-            print(f"Setor não encontrado para o device_id {device_id}")
-            return 'N/A'
+        setor = cursor.fetchone()
+        return setor[0] + 'TRUE' if setor else 'N/A'
 
     except Exception as e:
-        print(f"Erro ao buscar o setor: {e}")
+        print(f"Erro ao buscar setor: {e}")
         return 'N/A'
     finally:
-        # Garantir que a conexão e o cursor sejam fechados
         if cursor:
             cursor.close()
         if connection:
@@ -215,79 +159,34 @@ def get_setor(device_id, ip_cliente):
 
 @csrf_exempt
 @require_POST
-#
-# def dao_notifications(request):
-#     ip_cliente = get_client_ip(request)
-#     print('IP cliente', ip_cliente)
-#     access_logs = get_access_logs(ip_cliente)
-#     combined_data = []
-#
-#     for log in access_logs:
-#         user_data = get_user_data(log['user_id'], ip_cliente)
-#         # Obter o setor concatenado com 'TRUE'
-#         setor = get_setor(log.get('device_id', 'N/A'), ip_cliente)
-#         print(f"Setor para device_id {log.get('device_id', 'N/A')}: {setor}")
-#
-#         combined_data.append({
-#             'id': log['id'],
-#             'nome': user_data.get('name', 'N/A'),
-#             'device': log.get('device_id', 'N/A'),
-#             'logid': log['id'],
-#             'event': log.get('event', 0),  # Definindo valor padrão como 0
-#             'confidence': log.get('confidence', 0),  # Definindo valor padrão como 0
-#             'rol': user_data.get('registration', 0),  # Definindo valor padrão como 0
-#             'tipo': 'kids',
-#             'cpf': log['user_id'],
-#             'stringunica': (str(log.get('device_id', 'N/A')) + setor),
-#             'datahora': log.get('time', 0)  # Corrigido para usar o timestamp Unix correto
-#         })
-#
-#     if combined_data:
-#         save_to_db(combined_data)
-#         print(JsonResponse({"status": "success", "data": combined_data[-1]}))
-#         return JsonResponse({"status": "success", "data": combined_data[-1]})  # Retornar apenas o último registro
-#     else:
-#         return JsonResponse({"status": "success", "message": "Nenhum log recuperado."})
-
-@csrf_exempt
-@require_POST
 def dao_notifications(request):
     ip_cliente = get_client_ip(request)
     print('IP cliente', ip_cliente)
 
-    # Passar o ip_cliente para a função get_access_logs
     access_logs = get_access_logs(ip_cliente)
 
     if access_logs:
-        # Pegue apenas o último log
         log = access_logs[-1]
-
-        # Obter o setor concatenado com 'TRUE'
         setor = get_setor(log.get('device_id', 'N/A'), ip_cliente)
-        print(f"Setor para device_id {log.get('device_id', 'N/A')}: {setor}")
-
-        # Obter os dados do usuário relacionados ao log, passando o ip_cliente
         user_data = get_user_data(log['user_id'], ip_cliente)
 
-        # Salvar o último log no banco de dados
         combined_data = [{
             'id': log['id'],
             'nome': user_data.get('name', 'N/A'),
             'device': log.get('device_id', 'N/A'),
             'logid': log['id'],
-            'event': log.get('event', 0),  # Valor padrão 0
-            'confidence': log.get('confidence', 0),  # Valor padrão 0
-            'rol': user_data.get('registration', 0),  # Valor padrão 0
+            'event': log.get('event', 0),
+            'confidence': log.get('confidence', 0),
+            'rol': user_data.get('registration', 0),
             'tipo': setor,
             'cpf': log['user_id'],
-            'stringunica': (str(log.get('device_id', 'N/A')) + setor),  # Concatenar setor com 'TRUE'
-            'datahora': log.get('time', 0)  # Usar o timestamp correto
+            'stringunica': f"{log.get('device_id', 'N/A')}{setor}",
+            'datahora': log.get('time', 0)
         }]
 
-        # Chamar a função para salvar o último log
         save_to_db(combined_data)
 
-        return JsonResponse({"status": "success", "data": combined_data[-1]})  # Retornar o último registro
+        return JsonResponse({"status": "success", "data": combined_data[-1]})
     else:
         return JsonResponse({"status": "success", "message": "Nenhum log recuperado."})
 
