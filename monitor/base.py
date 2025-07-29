@@ -28,7 +28,7 @@ def get_client_ip(request):
 
 
 # URL e credenciais para login
-# LOGIN_URL = "http://192.168.0.129/login.fcgi"
+LOGIN_URL = "http://192.168.0.129/login.fcgi"
 LOGIN_BODY = {
     "login": "admin",
     "password": "admin"
@@ -36,12 +36,8 @@ LOGIN_BODY = {
 HEADERS = {"Content-Type": "application/json"}
 
 
-def get_session(ip_cliente):
-    """
-    Obtem a sessão usando o IP do cliente.
-    """
-    login_url = f"http://{ip_cliente}/login.fcgi"
-    response = requests.post(login_url, json=LOGIN_BODY, headers=HEADERS)
+def get_session():
+    response = requests.post(LOGIN_URL, json=LOGIN_BODY, headers=HEADERS)
     if response.status_code == 200:
         session_id = response.json().get("session")
         if session_id:
@@ -50,8 +46,8 @@ def get_session(ip_cliente):
     return None
 
 
-def get_access_logs(ip_cliente):
-    session_id = get_session(ip_cliente)
+def get_access_logs():
+    session_id = get_session()
     if not session_id:
         print("Sessão inválida ou não obtida.")
         return []
@@ -63,8 +59,7 @@ def get_access_logs(ip_cliente):
     start_timestamp = int(start_of_day.timestamp())
     end_timestamp = int(end_of_day.timestamp())
 
-    # Substituir o IP fixo pelo IP dinâmico obtido
-    url = f"http://{ip_cliente}/load_objects.fcgi?session={session_id}"
+    url = f"http://192.168.0.129/load_objects.fcgi?session={session_id}"
     body = {
         "object": "access_logs",
         "where": [
@@ -85,14 +80,13 @@ def get_access_logs(ip_cliente):
         return []
 
 
-def get_user_data(user_id, ip_cliente):
-    session_id = get_session(ip_cliente)
+def get_user_data(user_id):
+    session_id = get_session()
     if not session_id:
         print("Sessão inválida ou não obtida.")
         return {}
 
-    # Substituir o IP fixo pelo IP dinâmico obtido
-    url = f"http://{ip_cliente}/load_objects.fcgi?session={session_id}"
+    url = f"http://192.168.0.129/load_objects.fcgi?session={session_id}"
     body = {"object": "users", "where": {"users": {"id": user_id}}}
 
     response = requests.post(url, json=body, headers=HEADERS)
@@ -170,124 +164,35 @@ def save_to_db(data):
         print(f"Erro na conexão com o banco de dados: {e}")
 
 
-def get_setor(device_id, ip_cliente):
-    try:
-        # Garantir que device_id seja uma string para comparações com idface do tipo VARCHAR
-        device_id_str = str(device_id)
-
-        # Query SQL para buscar o setor, com cast explícito para bigint
-        query = """
-            SELECT setor
-            FROM tbdispositivo
-            WHERE CAST(idface AS bigint) = %s
-        """
-
-        # Conectar ao banco de dados
-        connection = psycopg2.connect(
-            host=DB_HOST,
-            port=DB_PORT,
-            dbname=DB_NAME,
-            user=DB_USER,
-            password=DB_PASSWORD
-        )
-        cursor = connection.cursor()
-
-        # Executar a consulta no banco de dados
-        cursor.execute(query, (device_id_str,))
-        setor = cursor.fetchone()
-
-        if setor:
-            return setor[0] + 'TRUE'  # Retorna o setor concatenado com 'TRUE'
-        else:
-            print(f"Setor não encontrado para o device_id {device_id}")
-            return 'N/A'
-
-    except Exception as e:
-        print(f"Erro ao buscar o setor: {e}")
-        return 'N/A'
-    finally:
-        # Garantir que a conexão e o cursor sejam fechados
-        if cursor:
-            cursor.close()
-        if connection:
-            connection.close()
-
-
-@csrf_exempt
-@require_POST
-#
-# def dao_notifications(request):
-#     ip_cliente = get_client_ip(request)
-#     print('IP cliente', ip_cliente)
-#     access_logs = get_access_logs(ip_cliente)
-#     combined_data = []
-#
-#     for log in access_logs:
-#         user_data = get_user_data(log['user_id'], ip_cliente)
-#         # Obter o setor concatenado com 'TRUE'
-#         setor = get_setor(log.get('device_id', 'N/A'), ip_cliente)
-#         print(f"Setor para device_id {log.get('device_id', 'N/A')}: {setor}")
-#
-#         combined_data.append({
-#             'id': log['id'],
-#             'nome': user_data.get('name', 'N/A'),
-#             'device': log.get('device_id', 'N/A'),
-#             'logid': log['id'],
-#             'event': log.get('event', 0),  # Definindo valor padrão como 0
-#             'confidence': log.get('confidence', 0),  # Definindo valor padrão como 0
-#             'rol': user_data.get('registration', 0),  # Definindo valor padrão como 0
-#             'tipo': 'kids',
-#             'cpf': log['user_id'],
-#             'stringunica': (str(log.get('device_id', 'N/A')) + setor),
-#             'datahora': log.get('time', 0)  # Corrigido para usar o timestamp Unix correto
-#         })
-#
-#     if combined_data:
-#         save_to_db(combined_data)
-#         print(JsonResponse({"status": "success", "data": combined_data[-1]}))
-#         return JsonResponse({"status": "success", "data": combined_data[-1]})  # Retornar apenas o último registro
-#     else:
-#         return JsonResponse({"status": "success", "message": "Nenhum log recuperado."})
-
 @csrf_exempt
 @require_POST
 def dao_notifications(request):
     ip_cliente = get_client_ip(request)
     print('IP cliente', ip_cliente)
+    access_logs = get_access_logs()
+    combined_data = []
 
-    # Passar o ip_cliente para a função get_access_logs
-    access_logs = get_access_logs(ip_cliente)
+    for log in access_logs:
+        user_data = get_user_data(log['user_id'])
 
-    if access_logs:
-        # Pegue apenas o último log
-        log = access_logs[-1]
-
-        # Obter o setor concatenado com 'TRUE'
-        setor = get_setor(log.get('device_id', 'N/A'), ip_cliente)
-        print(f"Setor para device_id {log.get('device_id', 'N/A')}: {setor}")
-
-        # Obter os dados do usuário relacionados ao log, passando o ip_cliente
-        user_data = get_user_data(log['user_id'], ip_cliente)
-
-        # Salvar o último log no banco de dados
-        combined_data = [{
+        combined_data.append({
             'id': log['id'],
             'nome': user_data.get('name', 'N/A'),
             'device': log.get('device_id', 'N/A'),
             'logid': log['id'],
-            'event': log.get('event', 0),  # Valor padrão 0
-            'confidence': log.get('confidence', 0),  # Valor padrão 0
-            'rol': user_data.get('registration', 0),  # Valor padrão 0
-            'tipo': setor,
+            'event': log.get('event', 0),  # Definindo valor padrão como 0
+            'confidence': log.get('confidence', 0),  # Definindo valor padrão como 0
+            'rol': user_data.get('registration', 0),  # Definindo valor padrão como 0
+            'tipo': 'kids',
             'cpf': log['user_id'],
-            'stringunica': (str(log.get('device_id', 'N/A')) + setor),  # Concatenar setor com 'TRUE'
-            'datahora': log.get('time', 0)  # Usar o timestamp correto
-        }]
+            'stringunica': (str(log.get('device_id', 'N/A')) + 'kidsTRUE'),
+            'datahora': log.get('time', 0)  # Corrigido para usar o timestamp Unix correto
+        })
 
-        # Chamar a função para salvar o último log
+    if combined_data:
         save_to_db(combined_data)
 
-        return JsonResponse({"status": "success", "data": combined_data[-1]})  # Retornar o último registro
+        return JsonResponse({"status": "success", "data": combined_data[-1]})  # Retornar apenas o último registro
     else:
         return JsonResponse({"status": "success", "message": "Nenhum log recuperado."})
 
